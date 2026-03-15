@@ -1,0 +1,288 @@
+---
+title: "STA 207 Final - Inference"
+format: html
+---
+
+# Data loading and Libraries
+
+```{r, load data and libraries}
+load("/Users/mhy/Desktop/STA207/df_subset (2).rda")
+
+# Convert column "subject" into factor
+df_subset$subject <- as.factor(df_subset$subject)
+
+# Libraries
+library(dplyr)
+library(car)
+library(lme4)
+library(influence.ME)
+library(broom.mixed) # For turning model results into tables
+library(tidyverse)
+```
+
+# Inferential Analysis
+
+## Model Proposal:
+
+### Multiple Linear Regression
+
+To find the best multiple linear model, we begin with our full model selected from our EDA.
+We make the following assumptions for our models:
+
+1. Linearity: The relationship between predictors and the outcome is linear.
+2. Independence: Observations (students) are independent.
+3. Homoscedasticity: The variance of error terms is constant across groups.
+4. Normality: The residuals are approximately normally distributed.
+
+```{r, basic MLR model}
+full_model <- lm(score ~ class_type+subject+gender+race+grade+urban, df_subset)
+summary(full_model)
+```
+
+From the summary statistic, we see that all the variables are signifcantly associated with score.
+
+#### Include Interaction Terms
+
+Including the interaction of subject and grade significantly reduced the curvature of the residuals versus fitted values plot, so we include this interaction term for the following models.
+```{r, MLR with interaction}
+plot(full_model, which=1)
+
+inter_full <- lm(score ~ class_type+subject+gender+grade+urban+race+subject*grade, df_subset)
+summary(inter_full)
+plot(inter_full, which=1)
+```
+
+#### ANOVA With Type III Sum of Square
+
+We consider running ANOVA on this full model using Type III Sum of Squares:
+```{r, ANOVA test with type 3 SS}
+Anova(inter_full, type="III")
+```
+
+From the summaries of multiple linear model and the ANOVA, we don't find any variable that is obviously irrelavant to scores. Thus, we keep all these variables and continue to fit our mixed effect model to discover causal relationship.
+
+### Mixed Models
+We make the following assumptions for our mixed models:
+
+1. Linearity: The relationship between predictors and the outcome is linear.
+2. Independence: Observations (students) are independent.
+3. Homoscedasticity: The variance of error terms is constant across groups.
+4. Normality: The residuals are approximately normally distributed.
+
+Stratifying using `schid`: Grouping students by schools.
+
+```{r, mixed model with school as RE}
+mixed_model_sch <- lmer(score
+    ~ class_type
+    + subject
+    + gender
+    + race
+    + grade
+    + subject*grade
+    + (1|schid),
+    data=df_subset)
+
+summary(mixed_model_sch)
+```
+
+Stratifying using `stdntid`: Consider each student as a group.
+This is our final model.
+```{r, mixed model with student as RE}
+mixed_model_std <- lmer(score
+    ~ class_type
+    + subject
+    + gender
+    + race
+    + grade
+    + subject*grade
+    + (1|stdntid),
+    data=df_subset)
+
+summary(mixed_model_std)
+final_model <- mixed_model_std
+#confint(final_model)
+```
+
+Stratifying using both `schid` and `stdntid`: See how much does school affect the score.
+```{r, mixed model with student and school as RE}
+mixed_model_std_sch <- lmer(score
+    ~ class_type
+    + subject
+    + gender
+    + race
+    + grade
+    + subject*grade
+    + (1|stdntid)
+    + (1|schid),
+    data=df_subset)
+
+summary(mixed_model_std_sch)
+```
+
+# Sensitivity Analysis
+
+```{r, LOO plot}
+# Get a list of all unique school IDs
+all_schools <- unique(df_subset$schid)
+# Create a vector to store results
+results <- numeric(length(all_schools))
+
+for(i in 1:length(all_schools)) {
+  # Excluding one school
+  temp_data <- subset(df_subset, schid != all_schools[i])
+  
+  temp_model <- lmer(score ~ class_type + grade + gender + subject + race + subject*grade + (1|stdntid), data = temp_data)
+  
+  # Coefficient for small class size
+  results[i] <- fixef(temp_model)["class_typesmall"]
+}
+
+plot(results, main="Sensitivity: Leave-One-School-Out", ylab="Small Class Coefficient")
+abline(h = mean(results), col="red")
+```
+
+```{r, subgroup}
+categories <- list(
+  subject = c("math", "reading", "listening"),
+  race = c("white", "black"),
+  urban = c("urban", "suburban", "inner city"),
+  gender = c("male", "female"),
+  grade = c("1", "2", "3")
+)
+
+# Function to run model and extract the "Small Class" coefficient
+get_effect <- function(col_name, group_val, my_form) {
+  sub_data <- df_subset %>% filter(!!sym(col_name) == group_val)
+  
+  model <- lmer(as.formula(my_form), data = sub_data)
+  
+  tidy(model, conf.int = TRUE, conf.method = "Wald") %>%
+    filter(term == "class_typesmall") %>%
+    select(estimate, conf.low, conf.high) %>%
+    mutate(subgroup = paste(col_name, ":", group_val), category = col_name)
+}
+
+subject1 <- get_effect("subject", "math", "score ~ gender + race + class_type + grade + urban + (1 | stdntid)")
+subject2 <- get_effect("subject", "reading", "score ~ gender + race + class_type + grade + urban + (1 | stdntid)")
+subject3 <- get_effect("subject", "listening", "score ~ gender + race + class_type + grade + urban + (1 | stdntid)")
+
+grade1 <- get_effect("grade", "1", "score ~ gender + race + class_type + subject + urban + (1 | stdntid)")
+grade2 <- get_effect("grade", "2", "score ~ gender + race + class_type + subject + urban + (1 | stdntid)")
+grade3 <- get_effect("grade", "3", "score ~ gender + race + class_type + subject + urban + (1 | stdntid)")
+
+gender1 <- get_effect("gender", "male", "score ~ grade + race + class_type + subject + urban + subject*grade + (1 | stdntid)")
+gender2 <- get_effect("gender", "female", "score ~ grade + race + class_type + subject + urban + subject*grade + (1 | stdntid)")
+
+#race1 <- get_effect("race", "asian", "score ~ grade + gender + class_type + subject + urban + subject*grade + (1 | stdntid)")
+race2 <- get_effect("race", "black", "score ~ grade + gender + class_type + subject + urban + subject*grade + (1 | stdntid)")
+#race3 <- get_effect("race", "hispanic", "score ~ grade + gender + class_type + subject + urban + subject*grade + (1 | stdntid)")
+#race4 <- get_effect("race", "other", "score ~ grade + gender + class_type + subject + urban + subject*grade + (1 | stdntid)")
+race5 <- get_effect("race", "white", "score ~ grade + gender + class_type + subject + urban + subject*grade + (1 | stdntid)")
+
+urban1 <- get_effect("urban", "inner city", "score ~ grade + gender + class_type + subject + race + subject*grade + (1 | stdntid)")
+urban2 <- get_effect("urban", "rural", "score ~ grade + gender + class_type + subject + race + subject*grade + (1 | stdntid)")
+urban3 <- get_effect("urban", "suburban", "score ~ grade + gender + class_type + subject + race + subject*grade + (1 | stdntid)")
+urban4 <- get_effect("urban", "urban", "score ~ grade + gender + class_type + subject + race + subject*grade + (1 | stdntid)")
+
+all_results <- bind_rows(subject1, subject2, subject3,
+    grade1, grade2, grade3,
+    gender1, gender2,
+    race2, race5,
+    urban1, urban2, urban3, urban4)
+all_results
+
+par(mar = c(5, 10, 4, 2) + 0.1)
+# Create a blank plot area
+plot(all_results$estimate, 1:nrow(all_results), 
+     pch = 19, xlim = range(c(all_results$conf.low, all_results$conf.high)),
+     yaxt = "n", xlab = "Estimate and 95% CI", ylab = "", 
+     main = "Small Class Effect by Subgroup")
+
+# Add the subgroup labels to the y-axis
+axis(2, at = 1:nrow(all_results), labels = all_results$subgroup, las = 1)
+
+# Add the confidence interval lines
+arrows(all_results$conf.low, 1:nrow(all_results), 
+       all_results$conf.high, 1:nrow(all_results), 
+       angle = 90, code = 3, length = 0.05)
+
+# Add a vertical reference line at 0
+#abline(v = 0, col = "red", lty = 2)
+
+#### I DO NOT LIKE GGPLOT
+#### WASTED TOO MUCH TIME TO debug
+#### YET IT STILL DOESN'T WORK!!!
+
+# Create the Forest Plot
+#ggplot(all_results, aes(x = estimate, y = subgroup)) +
+  # Add the point for the mean estimate
+#  geom_point(size = 3, color = "midnightblue") +
+  # Add the horizontal error bars (CI)
+#  geom_errorbarh(aes(xmin = conf.low, xmax = conf.high), height = 0.2) +
+  # Add a vertical line at 0 (No Effect line)
+#  geom_vline(xintercept = 0, linetype = "dashed", color = "red") +
+  # Clean up the labels
+#  labs(
+#    title = "Small Class Effect Size by Subject",
+#    x = "Estimated Score Increase (with 95% CI)",
+#    y = "Subject Subgroup"
+#  ) +
+#  theme_minimal()
+```
+
+# Plausibility Check
+## Linearity Check
+
+```{r, residual versus fitted plot for linearity}
+plot(final_model, type = c("p", "smooth"))
+```
+
+## Normality of Residuals and Random Effects
+```{r, histogram of residuals}
+# Plot the histogram of residuals
+res <- residuals(final_model)
+
+# Plot the histogram
+hist(res, 
+     breaks = 50, 
+     col = "skyblue", 
+     xlim = c(-100, 100),
+     main = "Histogram of Residuals", 
+     xlab = "Residuals")
+
+x <- seq(min(res), max(res), length = 100)
+y <- dnorm(x, mean = mean(res), sd = sd(res))/3
+y <- y * diff(hist(res, plot = FALSE)$mids[1:2]) * length(res)
+lines(x, y, col = "red", lwd = 2)
+```
+
+```{r, histogram of intercepts of schools}
+# Plot the histogram for random effect: student
+random_effects <- ranef(mixed_model_sch)
+school_intercepts <- random_effects$schid[, "(Intercept)"]
+hist(school_intercepts, 
+     breaks = 7, 
+     col = "darkseagreen", 
+     main = "Histogram of Random Intercepts (Schools)", 
+     xlab = "Random Effect Estimate")
+```
+
+```{r, histogram of intercepts of students}
+# Plot the histogram for random effect: student
+random_effects <- ranef(final_model)
+student_intercepts <- random_effects$stdntid[, "(Intercept)"]
+hist(student_intercepts, 
+     breaks = 20, 
+     col = "darkseagreen", 
+     main = "Histogram of Random Intercepts (Students)", 
+     xlab = "Random Effect Estimate")
+```
+
+## Homoscedasticity
+```{r, residual versus fitted plot for homoscedasticity}
+plot(final_model)
+```
+
+# Conclusion
+
+Small class indeed leads to better students' performance, regardless of which school they attend or the innate intelligence each student have.
